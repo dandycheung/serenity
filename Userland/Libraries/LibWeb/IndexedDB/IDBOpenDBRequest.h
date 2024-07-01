@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2024, Shannon Booth <shannon@serenityos.org>
+ * Copyright (c) 2024, Jamie Mansfield <jmansfield@cadixdev.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -17,6 +18,11 @@ class IDBOpenDBRequest : public IDBRequest {
 
 public:
     virtual ~IDBOpenDBRequest();
+
+    void set_onblocked(WebIDL::CallbackType*);
+    WebIDL::CallbackType* onblocked();
+    void set_onupgradeneeded(WebIDL::CallbackType*);
+    WebIDL::CallbackType* onupgradeneeded();
 
 protected:
     explicit IDBOpenDBRequest(JS::Realm&);

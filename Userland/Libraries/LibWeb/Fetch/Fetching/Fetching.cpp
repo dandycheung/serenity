@@ -17,6 +17,7 @@
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/Fetch/BodyInit.h>
 #include <LibWeb/Fetch/Fetching/Checks.h>
+#include <LibWeb/Fetch/Fetching/FetchedDataReceiver.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
 #include <LibWeb/Fetch/Fetching/PendingResponse.h>
 #include <LibWeb/Fetch/Fetching/RefCountedFlag.h>
@@ -30,6 +31,7 @@
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Statuses.h>
 #include <LibWeb/Fetch/Infrastructure/MimeTypeBlocking.h>
+#include <LibWeb/Fetch/Infrastructure/NetworkPartitionKey.h>
 #include <LibWeb/Fetch/Infrastructure/NoSniffBlocking.h>
 #include <LibWeb/Fetch/Infrastructure/PortBlocking.h>
 #include <LibWeb/Fetch/Infrastructure/Task.h>
@@ -44,6 +46,7 @@
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/Loader/LoadRequest.h>
 #include <LibWeb/Loader/ResourceLoader.h>
+#include <LibWeb/MixedContent/AbstractOperations.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/ReferrerPolicy/AbstractOperations.h>
 #include <LibWeb/SRI/SRI.h>
@@ -234,12 +237,14 @@ WebIDL::ExceptionOr<JS::GCPtr<PendingResponse>> main_fetch(JS::Realm& realm, Inf
 
     // FIXME: 4. Run report Content Security Policy violations for request.
     // FIXME: 5. Upgrade request to a potentially trustworthy URL, if appropriate.
-    // FIXME: 6. Upgrade a mixed content request to a potentially trustworthy URL, if appropriate.
+
+    // 6. Upgrade a mixed content request to a potentially trustworthy URL, if appropriate.
+    MixedContent::upgrade_a_mixed_content_request_to_a_potentially_trustworthy_url_if_appropriate(request);
 
     // 7. If should request be blocked due to a bad port, should fetching request be blocked as mixed content, or
     //    should request be blocked by Content Security Policy returns blocked, then set response to a network error.
     if (Infrastructure::block_bad_port(request) == Infrastructure::RequestOrResponseBlocking::Blocked
-        || false // FIXME: "should fetching request be blocked as mixed content"
+        || MixedContent::should_fetching_request_be_blocked_as_mixed_content(request) == Infrastructure::RequestOrResponseBlocking::Blocked
         || false // FIXME: "should request be blocked by Content Security Policy returns blocked"
     ) {
         response = Infrastructure::Response::network_error(vm, "Request was blocked"sv);
@@ -469,8 +474,8 @@ WebIDL::ExceptionOr<JS::GCPtr<PendingResponse>> main_fetch(JS::Realm& realm, Inf
 
             // 19. If response is not a network error and any of the following returns blocked
             if (!response->is_network_error() && (
-                    // FIXME: - should internalResponse to request be blocked as mixed content
-                    false
+                    // - should internalResponse to request be blocked as mixed content
+                    MixedContent::should_response_to_request_be_blocked_as_mixed_content(request, internal_response) == Infrastructure::RequestOrResponseBlocking::Blocked
                     // FIXME: - should internalResponse to request be blocked by Content Security Policy
                     || false
                     // - should internalResponse to request be blocked due to its MIME type
@@ -850,8 +855,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> scheme_fetch(JS::Realm& r
             return PendingResponse::create(vm, request, Infrastructure::Response::network_error(vm, "Failed to process 'data:' URL"sv));
 
         // 3. Let mimeType be dataURLStruct’s MIME type, serialized.
-        //    FIXME: Serialize MIME type.
-        auto const& mime_type = data_url_struct.value().mime_type;
+        auto const& mime_type = MUST(data_url_struct.value().mime_type.serialized());
 
         // 4. Return a new response whose status message is `OK`, header list is « (`Content-Type`, mimeType) », and
         //    body is dataURLStruct’s body as a body.
@@ -865,19 +869,19 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> scheme_fetch(JS::Realm& r
         return PendingResponse::create(vm, request, response);
     }
     // -> "file"
-    else if (request->current_url().scheme() == "file"sv) {
+    // AD-HOC: "resource"
+    else if (request->current_url().scheme() == "file"sv || request->current_url().scheme() == "resource"sv) {
         // For now, unfortunate as it is, file: URLs are left as an exercise for the reader.
         // When in doubt, return a network error.
-        return TRY(nonstandard_resource_loader_file_or_http_network_fetch(realm, fetch_params));
+        if (request->origin().has<HTML::Origin>() && (request->origin().get<HTML::Origin>().is_opaque() || request->origin().get<HTML::Origin>().scheme() == "file"sv || request->origin().get<HTML::Origin>().scheme() == "resource"sv))
+            return TRY(nonstandard_resource_loader_file_or_http_network_fetch(realm, fetch_params));
+        else
+            return PendingResponse::create(vm, request, Infrastructure::Response::network_error(vm, "Request with 'file:' or 'resource:' URL blocked"sv));
     }
     // -> HTTP(S) scheme
     else if (Infrastructure::is_http_or_https_scheme(request->current_url().scheme())) {
         // Return the result of running HTTP fetch given fetchParams.
         return http_fetch(realm, fetch_params);
-    }
-    // AD-HOC: "resource"
-    else if (request->current_url().scheme() == "resource"sv) {
-        return TRY(nonstandard_resource_loader_file_or_http_network_fetch(realm, fetch_params));
     }
 
     // 4. Return a network error.
@@ -898,13 +902,11 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> http_fetch(JS::Realm& rea
     // 1. Let request be fetchParams’s request.
     auto request = fetch_params.request();
 
-    // 2. Let response be null.
+    // 2. Let response and internalResponse be null.
     JS::GCPtr<Infrastructure::Response> response;
+    JS::GCPtr<Infrastructure::Response> internal_response;
 
-    // 3. Let actualResponse be null.
-    JS::GCPtr<Infrastructure::Response> actual_response;
-
-    // 4. If request’s service-workers mode is "all", then:
+    // 3. If request’s service-workers mode is "all", then:
     if (request->service_workers_mode() == Infrastructure::Request::ServiceWorkersMode::All) {
         // 1. Let requestForServiceWorker be a clone of request.
         auto request_for_service_worker = request->clone(realm);
@@ -925,7 +927,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> http_fetch(JS::Realm& rea
         // FIXME: 4. Set response to the result of invoking handle fetch for requestForServiceWorker, with fetchParams’s
         //           controller and fetchParams’s cross-origin isolated capability.
 
-        // 5. If response is not null, then:
+        // 5. If response is non-null, then:
         if (response) {
             // 1. Set fetchParams’s timing info’s final service worker start time to serviceWorkerStartTime.
             fetch_params.timing_info()->set_final_service_worker_start_time(service_worker_start_time);
@@ -935,9 +937,9 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> http_fetch(JS::Realm& rea
                 // FIXME: Implement cancelling streams
             }
 
-            // 3. Set actualResponse to response, if response is not a filtered response, and to response’s internal
-            //    response otherwise.
-            actual_response = !is<Infrastructure::FilteredResponse>(*response)
+            // 3. Set internalResponse to response, if response is not a filtered response; otherwise to response’s
+            //    internal response.
+            internal_response = !is<Infrastructure::FilteredResponse>(*response)
                 ? JS::NonnullGCPtr { *response }
                 : static_cast<Infrastructure::FilteredResponse const&>(*response).internal_response();
 
@@ -963,7 +965,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> http_fetch(JS::Realm& rea
 
     auto returned_pending_response = PendingResponse::create(vm, request);
 
-    // 5. If response is null, then:
+    // 4. If response is null, then:
     if (!response) {
         // 1. If makeCORSPreflight is true and one of these conditions is true:
         // NOTE: This step checks the CORS-preflight cache and if there is no suitable entry it performs a
@@ -993,7 +995,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> http_fetch(JS::Realm& rea
             if (request->redirect_mode() == Infrastructure::Request::RedirectMode::Follow)
                 request->set_service_workers_mode(Infrastructure::Request::ServiceWorkersMode::None);
 
-            // 3. Set response and actualResponse to the result of running HTTP-network-or-cache fetch given fetchParams.
+            // 3. Set response and internalResponse to the result of running HTTP-network-or-cache fetch given fetchParams.
             return http_network_or_cache_fetch(*realm, *fetch_params);
         };
 
@@ -1021,10 +1023,10 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> http_fetch(JS::Realm& rea
         pending_actual_response = PendingResponse::create(vm, request, Infrastructure::Response::create(vm));
     }
 
-    pending_actual_response->when_loaded([&realm, &vm, &fetch_params, request, response, actual_response, returned_pending_response, response_was_null = !response](JS::NonnullGCPtr<Infrastructure::Response> resolved_actual_response) mutable {
+    pending_actual_response->when_loaded([&realm, &vm, &fetch_params, request, response, internal_response, returned_pending_response, response_was_null = !response](JS::NonnullGCPtr<Infrastructure::Response> resolved_actual_response) mutable {
         dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'HTTP fetch' pending_actual_response load callback");
         if (response_was_null) {
-            response = actual_response = resolved_actual_response;
+            response = internal_response = resolved_actual_response;
             // 4. If request’s response tainting is "cors" and a CORS check for request and response returns failure,
             //    then return a network error.
             // NOTE: As the CORS check is not to be applied to responses whose status is 304 or 407, or responses from
@@ -1040,8 +1042,8 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> http_fetch(JS::Realm& rea
                 request->set_timing_allow_failed(true);
         }
 
-        // 6. If either request’s response tainting or response’s type is "opaque", and the cross-origin resource
-        //    policy check with request’s origin, request’s client, request’s destination, and actualResponse returns
+        // 5. If either request’s response tainting or response’s type is "opaque", and the cross-origin resource
+        //    policy check with request’s origin, request’s client, request’s destination, and internalResponse returns
         //    blocked, then return a network error.
         // NOTE: The cross-origin resource policy check runs for responses coming from the network and responses coming
         //       from the service worker. This is different from the CORS check, as request’s client and the service
@@ -1055,9 +1057,9 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> http_fetch(JS::Realm& rea
 
         JS::GCPtr<PendingResponse> inner_pending_response;
 
-        // 7. If actualResponse’s status is a redirect status, then:
-        if (Infrastructure::is_redirect_status(actual_response->status())) {
-            // FIXME: 1. If actualResponse’s status is not 303, request’s body is not null, and the connection uses HTTP/2,
+        // 6. If internalResponse’s status is a redirect status:
+        if (Infrastructure::is_redirect_status(internal_response->status())) {
+            // FIXME: 1. If internalResponse’s status is not 303, request’s body is non-null, and the connection uses HTTP/2,
             //           then user agents may, and are even encouraged to, transmit an RST_STREAM frame.
             // NOTE: 303 is excluded as certain communities ascribe special status to it.
 
@@ -1065,7 +1067,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> http_fetch(JS::Realm& rea
             switch (request->redirect_mode()) {
             // -> "error"
             case Infrastructure::Request::RedirectMode::Error:
-                // Set response to a network error.
+                // 1. Set response to a network error.
                 response = Infrastructure::Response::network_error(vm, "Request with 'error' redirect mode received redirect response"_string);
                 break;
             // -> "manual"
@@ -1078,14 +1080,14 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> http_fetch(JS::Realm& rea
                     });
                 }
                 // 2. Otherwise, set response to an opaque-redirect filtered response whose internal response is
-                //    actualResponse.
+                //    internalResponse.
                 else {
-                    response = Infrastructure::OpaqueRedirectFilteredResponse::create(vm, *actual_response);
+                    response = Infrastructure::OpaqueRedirectFilteredResponse::create(vm, *internal_response);
                 }
                 break;
             // -> "follow"
             case Infrastructure::Request::RedirectMode::Follow:
-                // Set response to the result of running HTTP-redirect fetch given fetchParams and response.
+                // 1. Set response to the result of running HTTP-redirect fetch given fetchParams and response.
                 inner_pending_response = TRY_OR_IGNORE(http_redirect_fetch(realm, fetch_params, *response));
                 break;
             default:
@@ -1103,8 +1105,8 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> http_fetch(JS::Realm& rea
         }
     });
 
-    // 8. Return response.
-    // NOTE: Typically actualResponse’s body’s stream is still being enqueued to after returning.
+    // 7. Return response.
+    // NOTE: Typically internalResponse’s body’s stream is still being enqueued to after returning.
     return returned_pending_response;
 }
 
@@ -1118,14 +1120,14 @@ WebIDL::ExceptionOr<JS::GCPtr<PendingResponse>> http_redirect_fetch(JS::Realm& r
     // 1. Let request be fetchParams’s request.
     auto request = fetch_params.request();
 
-    // 2. Let actualResponse be response, if response is not a filtered response, and response’s internal response
-    //    otherwise.
-    auto actual_response = !is<Infrastructure::FilteredResponse>(response)
+    // 2. Let internalResponse be response, if response is not a filtered response; otherwise response’s internal
+    //    response.
+    auto internal_response = !is<Infrastructure::FilteredResponse>(response)
         ? JS::NonnullGCPtr { response }
         : static_cast<Infrastructure::FilteredResponse const&>(response).internal_response();
 
-    // 3. Let locationURL be actualResponse’s location URL given request’s current URL’s fragment.
-    auto location_url_or_error = actual_response->location_url(request->current_url().fragment());
+    // 3. Let locationURL be internalResponse’s location URL given request’s current URL’s fragment.
+    auto location_url_or_error = internal_response->location_url(request->current_url().fragment());
 
     // 4. If locationURL is null, then return response.
     if (!location_url_or_error.is_error() && !location_url_or_error.value().has_value())
@@ -1148,7 +1150,7 @@ WebIDL::ExceptionOr<JS::GCPtr<PendingResponse>> http_redirect_fetch(JS::Realm& r
     // 8. Increase request’s redirect count by 1.
     request->set_redirect_count(request->redirect_count() + 1);
 
-    // 8. If request’s mode is "cors", locationURL includes credentials, and request’s origin is not same origin with
+    // 9. If request’s mode is "cors", locationURL includes credentials, and request’s origin is not same origin with
     //    locationURL’s origin, then return a network error.
     if (request->mode() == Infrastructure::Request::Mode::CORS
         && location_url.includes_credentials()
@@ -1162,9 +1164,9 @@ WebIDL::ExceptionOr<JS::GCPtr<PendingResponse>> http_redirect_fetch(JS::Realm& r
     if (request->response_tainting() == Infrastructure::Request::ResponseTainting::CORS && location_url.includes_credentials())
         return PendingResponse::create(vm, request, Infrastructure::Response::network_error(vm, "Request with 'cors' response tainting must not include credentials in redirect URL"sv));
 
-    // 11. If actualResponse’s status is not 303, request’s body is non-null, and request’s body’s source is null, then
+    // 11. If internalResponse’s status is not 303, request’s body is non-null, and request’s body’s source is null, then
     //     return a network error.
-    if (actual_response->status() != 303
+    if (internal_response->status() != 303
         && !request->body().has<Empty>()
         && request->body().get<JS::NonnullGCPtr<Infrastructure::Body>>()->source().has<Empty>()) {
         return PendingResponse::create(vm, request, Infrastructure::Response::network_error(vm, "Request has body but no body source"sv));
@@ -1172,10 +1174,10 @@ WebIDL::ExceptionOr<JS::GCPtr<PendingResponse>> http_redirect_fetch(JS::Realm& r
 
     // 12. If one of the following is true
     if (
-        // - actualResponse’s status is 301 or 302 and request’s method is `POST`
-        ((actual_response->status() == 301 || actual_response->status() == 302) && request->method() == "POST"sv.bytes())
-        // - actualResponse’s status is 303 and request’s method is not `GET` or `HEAD`
-        || (actual_response->status() == 303 && !(request->method() == "GET"sv.bytes() || request->method() == "HEAD"sv.bytes()))
+        // - internalResponse’s status is 301 or 302 and request’s method is `POST`
+        ((internal_response->status() == 301 || internal_response->status() == 302) && request->method() == "POST"sv.bytes())
+        // - internalResponse’s status is 303 and request’s method is not `GET` or `HEAD`
+        || (internal_response->status() == 303 && !(request->method() == "GET"sv.bytes() || request->method() == "HEAD"sv.bytes()))
         // then:
     ) {
         // 1. Set request’s method to `GET` and request’s body to null.
@@ -1234,7 +1236,8 @@ WebIDL::ExceptionOr<JS::GCPtr<PendingResponse>> http_redirect_fetch(JS::Realm& r
     // 18. Append locationURL to request’s URL list.
     request->url_list().append(location_url);
 
-    // FIXME: 19. Invoke set request’s referrer policy on redirect on request and actualResponse.
+    // 19. Invoke set request’s referrer policy on redirect on request and internalResponse.
+    ReferrerPolicy::set_request_referrer_policy_on_redirect(request, internal_response);
 
     // 20. Let recursive be true.
     auto recursive = Recursive::Yes;
@@ -1251,30 +1254,6 @@ WebIDL::ExceptionOr<JS::GCPtr<PendingResponse>> http_redirect_fetch(JS::Realm& r
     // 22. Return the result of running main fetch given fetchParams and recursive.
     return main_fetch(realm, fetch_params, recursive);
 }
-
-// https://fetch.spec.whatwg.org/#network-partition-key
-struct NetworkPartitionKey {
-    HTML::Origin top_level_origin;
-    // FIXME: See https://github.com/whatwg/fetch/issues/1035
-    //     This is the document origin in other browsers
-    void* second_key = nullptr;
-
-    bool operator==(NetworkPartitionKey const&) const = default;
-};
-
-}
-
-// FIXME: Take this with us to the eventual header these structs end up in to avoid closing and re-opening the namespace.
-template<>
-class AK::Traits<Web::Fetch::Fetching::NetworkPartitionKey> : public DefaultTraits<Web::Fetch::Fetching::NetworkPartitionKey> {
-public:
-    static unsigned hash(Web::Fetch::Fetching::NetworkPartitionKey const& partition_key)
-    {
-        return ::AK::Traits<Web::HTML::Origin>::hash(partition_key.top_level_origin);
-    }
-};
-
-namespace Web::Fetch::Fetching {
 
 struct CachedResponse {
     Vector<Infrastructure::Header> headers;
@@ -1307,7 +1286,7 @@ private:
 
 class HTTPCache {
 public:
-    CachePartition& get(NetworkPartitionKey const& key)
+    CachePartition& get(Infrastructure::NetworkPartitionKey const& key)
     {
         return *m_cache.ensure(key, [] {
             return make<CachePartition>();
@@ -1321,48 +1300,14 @@ public:
     }
 
 private:
-    HashMap<NetworkPartitionKey, NonnullOwnPtr<CachePartition>> m_cache;
+    HashMap<Infrastructure::NetworkPartitionKey, NonnullOwnPtr<CachePartition>> m_cache;
 };
-
-// https://fetch.spec.whatwg.org/#determine-the-network-partition-key
-static NetworkPartitionKey determine_the_network_partition_key(HTML::Environment const& environment)
-{
-    // 1. Let topLevelOrigin be environment’s top-level origin.
-    auto top_level_origin = environment.top_level_origin;
-
-    // FIXME: 2. If topLevelOrigin is null, then set topLevelOrigin to environment’s top-level creation URL’s origin
-    // This field is supposed to be nullable
-
-    // 3. Assert: topLevelOrigin is an origin.
-
-    // FIXME: 4. Let topLevelSite be the result of obtaining a site, given topLevelOrigin.
-
-    // 5. Let secondKey be null or an implementation-defined value.
-    void* second_key = nullptr;
-
-    // 6. Return (topLevelSite, secondKey).
-    return { top_level_origin, second_key };
-}
-
-// https://fetch.spec.whatwg.org/#request-determine-the-network-partition-key
-static Optional<NetworkPartitionKey> determine_the_network_partition_key(Infrastructure::Request const& request)
-{
-    // 1. If request’s reserved client is non-null, then return the result of determining the network partition key given request’s reserved client.
-    if (auto reserved_client = request.reserved_client())
-        return determine_the_network_partition_key(*reserved_client);
-
-    // 2. If request’s client is non-null, then return the result of determining the network partition key given request’s client.
-    if (auto client = request.client())
-        return determine_the_network_partition_key(*client);
-
-    return {};
-}
 
 // https://fetch.spec.whatwg.org/#determine-the-http-cache-partition
 static Optional<CachePartition> determine_the_http_cache_partition(Infrastructure::Request const& request)
 {
     // 1. Let key be the result of determining the network partition key given request.
-    auto key = determine_the_network_partition_key(request);
+    auto key = Infrastructure::determine_the_network_partition_key(request);
 
     // 2. If key is null, then return null.
     if (!key.has_value())
@@ -1932,7 +1877,7 @@ static void log_load_request(auto const& load_request)
 static void log_response(auto const& status_code, auto const& headers, auto const& data)
 {
     dbgln("< HTTP/1.1 {}", status_code.value_or(0));
-    for (auto const& [name, value] : headers)
+    for (auto const& [name, value] : headers.headers())
         dbgln("< {}: {}", name, value);
     dbgln("<");
     for (auto line : StringView { data }.split_view('\n', SplitBehavior::KeepEmpty))
@@ -1962,8 +1907,10 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> nonstandard_resource_load
     load_request.set_url(request->current_url());
     load_request.set_page(page);
     load_request.set_method(ByteString::copy(request->method()));
+
     for (auto const& header : *request->header_list())
         load_request.set_header(ByteString::copy(header.name), ByteString::copy(header.value));
+
     if (auto const* body = request->body().get_pointer<JS::NonnullGCPtr<Infrastructure::Body>>()) {
         TRY((*body)->source().visit(
             [&](ByteBuffer const& byte_buffer) -> WebIDL::ExceptionOr<void> {
@@ -1981,13 +1928,121 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> nonstandard_resource_load
 
     auto pending_response = PendingResponse::create(vm, request);
 
-    dbgln_if(WEB_FETCH_DEBUG, "Fetch: Invoking ResourceLoader");
-    if constexpr (WEB_FETCH_DEBUG)
+    if constexpr (WEB_FETCH_DEBUG) {
+        dbgln("Fetch: Invoking ResourceLoader");
         log_load_request(load_request);
+    }
 
-    ResourceLoader::the().load(
-        load_request,
-        [&realm, &vm, request, pending_response](auto data, auto& response_headers, auto status_code) {
+    // FIXME: This check should be removed and all HTTP requests should go through the `ResourceLoader::load_unbuffered`
+    //        path. The buffer option should then be supplied to the steps below that allow us to buffer data up to a
+    //        user-agent-defined limit (or not). However, we will need to fully use stream operations throughout the
+    //        fetch process to enable this (e.g. Body::fully_read must use streams for this to work).
+    if (request->buffer_policy() == Infrastructure::Request::BufferPolicy::DoNotBufferResponse) {
+        HTML::TemporaryExecutionContext execution_context { Bindings::host_defined_environment_settings_object(realm), HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+
+        // 12. Let stream be a new ReadableStream.
+        auto stream = realm.heap().allocate<Streams::ReadableStream>(realm, realm);
+        auto fetched_data_receiver = realm.heap().allocate<FetchedDataReceiver>(realm, fetch_params, stream);
+
+        // 10. Let pullAlgorithm be the followings steps:
+        auto pull_algorithm = JS::create_heap_function(realm.heap(), [&realm, fetched_data_receiver]() {
+            // 1. Let promise be a new promise.
+            auto promise = WebIDL::create_promise(realm);
+
+            // 2. Run the following steps in parallel:
+            // NOTE: This is handled by FetchedDataReceiver.
+            fetched_data_receiver->set_pending_promise(promise);
+
+            // 3. Return promise.
+            return promise;
+        });
+
+        // 11. Let cancelAlgorithm be an algorithm that aborts fetchParams’s controller with reason, given reason.
+        auto cancel_algorithm = JS::create_heap_function(realm.heap(), [&realm, &fetch_params](JS::Value reason) {
+            fetch_params.controller()->abort(realm, reason);
+            return WebIDL::create_resolved_promise(realm, JS::js_undefined());
+        });
+
+        // 13. Set up stream with byte reading support with pullAlgorithm set to pullAlgorithm, cancelAlgorithm set to cancelAlgorithm.
+        Streams::set_up_readable_stream_controller_with_byte_reading_support(stream, pull_algorithm, cancel_algorithm);
+
+        auto on_headers_received = [&vm, request, pending_response, stream](auto const& response_headers, Optional<u32> status_code) {
+            if (pending_response->is_resolved()) {
+                // RequestServer will send us the response headers twice, the second time being for HTTP trailers. This
+                // fetch algorithm is not interested in trailers, so just drop them here.
+                return;
+            }
+
+            auto response = Infrastructure::Response::create(vm);
+            response->set_status(status_code.value_or(200));
+            // FIXME: Set response status message
+
+            if constexpr (WEB_FETCH_DEBUG) {
+                dbgln("Fetch: ResourceLoader load for '{}' {}: (status {})",
+                    request->url(),
+                    Infrastructure::is_ok_status(response->status()) ? "complete"sv : "failed"sv,
+                    response->status());
+                log_response(status_code, response_headers, ReadonlyBytes {});
+            }
+
+            for (auto const& [name, value] : response_headers.headers()) {
+                auto header = Infrastructure::Header::from_string_pair(name, value);
+                response->header_list()->append(move(header));
+            }
+
+            // 14. Set response’s body to a new body whose stream is stream.
+            response->set_body(Infrastructure::Body::create(vm, stream));
+
+            // 17. Return response.
+            // NOTE: Typically response’s body’s stream is still being enqueued to after returning.
+            pending_response->resolve(response);
+        };
+
+        // 16. Run these steps in parallel:
+        //    FIXME: 1. Run these steps, but abort when fetchParams is canceled:
+        auto on_data_received = [fetched_data_receiver](auto bytes) {
+            // 1. If one or more bytes have been transmitted from response’s message body, then:
+            if (!bytes.is_empty()) {
+                // 1. Let bytes be the transmitted bytes.
+
+                // FIXME: 2. Let codings be the result of extracting header list values given `Content-Encoding` and response’s header list.
+                // FIXME: 3. Increase response’s body info’s encoded size by bytes’s length.
+                // FIXME: 4. Set bytes to the result of handling content codings given codings and bytes.
+                // FIXME: 5. Increase response’s body info’s decoded size by bytes’s length.
+                // FIXME: 6. If bytes is failure, then terminate fetchParams’s controller.
+
+                // 7. Append bytes to buffer.
+                fetched_data_receiver->on_data_received(bytes);
+
+                // FIXME: 8. If the size of buffer is larger than an upper limit chosen by the user agent, ask the user agent
+                //           to suspend the ongoing fetch.
+            }
+        };
+
+        auto on_complete = [&vm, &realm, pending_response, stream](auto success, auto error_message) {
+            HTML::TemporaryExecutionContext execution_context { Bindings::host_defined_environment_settings_object(realm), HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+
+            // 16.1.1.2. Otherwise, if the bytes transmission for response’s message body is done normally and stream is readable,
+            //           then close stream, and abort these in-parallel steps.
+            if (success) {
+                if (stream->is_readable())
+                    stream->close();
+            }
+            // 16.1.2.2. Otherwise, if stream is readable, error stream with a TypeError.
+            else {
+                auto error = MUST(String::formatted("Load failed: {}", error_message));
+
+                if (stream->is_readable())
+                    stream->error(JS::TypeError::create(realm, error));
+
+                if (!pending_response->is_resolved())
+                    pending_response->resolve(Infrastructure::Response::network_error(vm, error));
+            }
+        };
+
+        ResourceLoader::the().load_unbuffered(load_request, move(on_headers_received), move(on_data_received), move(on_complete));
+    } else {
+        auto on_load_success = [&realm, &vm, request, pending_response](auto data, auto& response_headers, auto status_code) {
             dbgln_if(WEB_FETCH_DEBUG, "Fetch: ResourceLoader load for '{}' complete", request->url());
             if constexpr (WEB_FETCH_DEBUG)
                 log_response(status_code, response_headers, data);
@@ -1995,14 +2050,15 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> nonstandard_resource_load
             auto response = Infrastructure::Response::create(vm);
             response->set_status(status_code.value_or(200));
             response->set_body(move(body));
-            for (auto const& [name, value] : response_headers) {
+            for (auto const& [name, value] : response_headers.headers()) {
                 auto header = Infrastructure::Header::from_string_pair(name, value);
                 response->header_list()->append(move(header));
             }
             // FIXME: Set response status message
             pending_response->resolve(response);
-        },
-        [&realm, &vm, request, pending_response](auto& error, auto status_code, auto data, auto& response_headers) {
+        };
+
+        auto on_load_error = [&realm, &vm, request, pending_response](auto& error, auto status_code, auto data, auto& response_headers) {
             dbgln_if(WEB_FETCH_DEBUG, "Fetch: ResourceLoader load for '{}' failed: {} (status {})", request->url(), error, status_code.value_or(0));
             if constexpr (WEB_FETCH_DEBUG)
                 log_response(status_code, response_headers, data);
@@ -2015,14 +2071,17 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> nonstandard_resource_load
                 response->set_status(status_code.value_or(400));
                 auto [body, _] = TRY_OR_IGNORE(extract_body(realm, data));
                 response->set_body(move(body));
-                for (auto const& [name, value] : response_headers) {
+                for (auto const& [name, value] : response_headers.headers()) {
                     auto header = Infrastructure::Header::from_string_pair(name, value);
                     response->header_list()->append(move(header));
                 }
                 // FIXME: Set response status message
             }
             pending_response->resolve(response);
-        });
+        };
+
+        ResourceLoader::the().load(load_request, move(on_load_success), move(on_load_error));
+    }
 
     return pending_response;
 }

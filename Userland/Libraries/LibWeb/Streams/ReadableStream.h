@@ -70,6 +70,8 @@ public:
 
     static WebIDL::ExceptionOr<JS::NonnullGCPtr<ReadableStream>> construct_impl(JS::Realm&, Optional<JS::Handle<JS::Object>> const& underlying_source, QueuingStrategy const& = {});
 
+    static WebIDL::ExceptionOr<JS::NonnullGCPtr<ReadableStream>> from(JS::VM& vm, JS::Value async_iterable);
+
     virtual ~ReadableStream() override;
 
     bool locked() const;
@@ -80,6 +82,7 @@ public:
     WebIDL::ExceptionOr<ReadableStreamPair> tee();
 
     void close();
+    void error(JS::Value);
 
     Optional<ReadableStreamController>& controller() { return m_controller; }
     void set_controller(Optional<ReadableStreamController> value) { m_controller = move(value); }

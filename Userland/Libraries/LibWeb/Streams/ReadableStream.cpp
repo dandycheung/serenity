@@ -68,6 +68,13 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<ReadableStream>> ReadableStream::construct_
     return readable_stream;
 }
 
+// https://streams.spec.whatwg.org/#rs-from
+WebIDL::ExceptionOr<JS::NonnullGCPtr<ReadableStream>> ReadableStream::from(JS::VM& vm, JS::Value async_iterable)
+{
+    // 1. Return ? ReadableStreamFromIterable(asyncIterable).
+    return TRY(readable_stream_from_iterable(vm, async_iterable));
+}
+
 ReadableStream::ReadableStream(JS::Realm& realm)
     : PlatformObject(realm)
 {
@@ -183,6 +190,22 @@ void ReadableStream::close()
         // 2. Otherwise, perform ! ReadableStreamDefaultControllerClose(stream.[[controller]]).
         [&](JS::NonnullGCPtr<ReadableStreamDefaultController> controller) {
             readable_stream_default_controller_close(*controller);
+        });
+}
+
+// https://streams.spec.whatwg.org/#readablestream-error
+void ReadableStream::error(JS::Value error)
+{
+    controller()->visit(
+        // 1. If stream.[[controller]] implements ReadableByteStreamController, then perform
+        //    ! ReadableByteStreamControllerError(stream.[[controller]], e).
+        [&](JS::NonnullGCPtr<ReadableByteStreamController> controller) {
+            readable_byte_stream_controller_error(controller, error);
+        },
+
+        // 2. Otherwise, perform ! ReadableStreamDefaultControllerError(stream.[[controller]], e).
+        [&](JS::NonnullGCPtr<ReadableStreamDefaultController> controller) {
+            readable_stream_default_controller_error(controller, error);
         });
 }
 

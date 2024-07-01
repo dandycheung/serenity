@@ -27,9 +27,11 @@ struct ThreadData;
 class TimeoutSet;
 
 HashMap<pthread_t, ThreadData*> s_thread_data;
+pthread_key_t s_thread_key;
 static pthread_rwlock_t s_thread_data_lock_impl;
 static pthread_rwlock_t* s_thread_data_lock = nullptr;
 thread_local pthread_t s_thread_id;
+thread_local OwnPtr<ThreadData> s_this_thread_data;
 
 short notification_type_to_poll_events(NotificationType type)
 {
@@ -221,29 +223,31 @@ struct ThreadData {
         if (!s_thread_data_lock) {
             pthread_rwlock_init(&s_thread_data_lock_impl, nullptr);
             s_thread_data_lock = &s_thread_data_lock_impl;
+            pthread_key_create(&s_thread_key, [](void*) {
+                s_this_thread_data.clear();
+            });
         }
 
         if (s_thread_id == 0)
             s_thread_id = pthread_self();
         ThreadData* data = nullptr;
-        pthread_rwlock_rdlock(&*s_thread_data_lock);
-        if (!s_thread_data.contains(s_thread_id)) {
-            // FIXME: Don't leak this.
+        if (!s_this_thread_data) {
             data = new ThreadData;
-            pthread_rwlock_unlock(&*s_thread_data_lock);
+            s_this_thread_data = adopt_own(*data);
+
             pthread_rwlock_wrlock(&*s_thread_data_lock);
-            s_thread_data.set(s_thread_id, data);
+            s_thread_data.set(s_thread_id, s_this_thread_data.ptr());
+            pthread_rwlock_unlock(&*s_thread_data_lock);
         } else {
-            data = s_thread_data.get(s_thread_id).value();
+            data = s_this_thread_data.ptr();
         }
-        pthread_rwlock_unlock(&*s_thread_data_lock);
         return *data;
     }
 
-    static ThreadData& for_thread(pthread_t thread_id)
+    static ThreadData* for_thread(pthread_t thread_id)
     {
         pthread_rwlock_rdlock(&*s_thread_data_lock);
-        auto& result = *s_thread_data.get(thread_id).value();
+        auto result = s_thread_data.get(thread_id).value_or(nullptr);
         pthread_rwlock_unlock(&*s_thread_data_lock);
         return result;
     }
@@ -252,6 +256,13 @@ struct ThreadData {
     {
         pid = getpid();
         initialize_wake_pipe();
+    }
+
+    ~ThreadData()
+    {
+        pthread_rwlock_wrlock(&*s_thread_data_lock);
+        s_thread_data.remove(s_thread_id);
+        pthread_rwlock_unlock(&*s_thread_data_lock);
     }
 
     void initialize_wake_pipe()
@@ -645,7 +656,10 @@ intptr_t EventLoopManagerUnix::register_timer(EventReceiver& object, int millise
 void EventLoopManagerUnix::unregister_timer(intptr_t timer_id)
 {
     auto* timer = bit_cast<EventLoopTimer*>(timer_id);
-    auto& thread_data = ThreadData::for_thread(timer->owner_thread);
+    auto thread_data_ptr = ThreadData::for_thread(timer->owner_thread);
+    if (!thread_data_ptr)
+        return;
+    auto& thread_data = *thread_data_ptr;
     auto expected = false;
     if (timer->is_being_deleted.compare_exchange_strong(expected, true, AK::MemoryOrder::memory_order_acq_rel)) {
         if (timer->is_scheduled())
@@ -671,8 +685,11 @@ void EventLoopManagerUnix::register_notifier(Notifier& notifier)
 
 void EventLoopManagerUnix::unregister_notifier(Notifier& notifier)
 {
-    auto& thread_data = ThreadData::for_thread(notifier.owner_thread());
+    auto thread_data_ptr = ThreadData::for_thread(notifier.owner_thread());
+    if (!thread_data_ptr)
+        return;
 
+    auto& thread_data = *thread_data_ptr;
     auto it = thread_data.notifier_by_ptr.find(&notifier);
     VERIFY(it != thread_data.notifier_by_ptr.end());
 

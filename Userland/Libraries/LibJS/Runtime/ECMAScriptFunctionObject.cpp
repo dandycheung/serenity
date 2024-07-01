@@ -382,7 +382,7 @@ ThrowCompletionOr<Value> ECMAScriptFunctionObject::internal_call(Value this_argu
     // 1. Let callerContext be the running execution context.
     // NOTE: No-op, kept by the VM in its execution context stack.
 
-    auto callee_context = ExecutionContext::create(heap());
+    auto callee_context = ExecutionContext::create();
 
     // Non-standard
     callee_context->arguments.ensure_capacity(max(arguments_list.size(), m_formal_parameters.size()));
@@ -457,7 +457,7 @@ ThrowCompletionOr<NonnullGCPtr<Object>> ECMAScriptFunctionObject::internal_const
         this_argument = TRY(ordinary_create_from_constructor<Object>(vm, new_target, &Intrinsics::object_prototype, ConstructWithPrototypeTag::Tag));
     }
 
-    auto callee_context = ExecutionContext::create(heap());
+    auto callee_context = ExecutionContext::create();
 
     // Non-standard
     callee_context->arguments.ensure_capacity(max(arguments_list.size(), m_formal_parameters.size()));
@@ -506,15 +506,6 @@ ThrowCompletionOr<NonnullGCPtr<Object>> ECMAScriptFunctionObject::internal_const
 
     // 10. If result.[[Type]] is return, then
     if (result.type() == Completion::Type::Return) {
-        // FIXME: This is leftover from untangling the call/construct mess - doesn't belong here in any way, but removing it breaks derived classes.
-        // Likely fixed by making ClassDefinitionEvaluation fully spec compliant.
-        if (kind == ConstructorKind::Derived && result.value()->is_object()) {
-            auto prototype = TRY(new_target.get(vm.names.prototype));
-            if (prototype.is_object())
-                TRY(result.value()->as_object().internal_set_prototype_of(&prototype.as_object()));
-        }
-        // EOF (End of FIXME)
-
         // a. If Type(result.[[Value]]) is Object, return result.[[Value]].
         if (result.value()->is_object())
             return result.value()->as_object();

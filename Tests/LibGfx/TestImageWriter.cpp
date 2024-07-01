@@ -129,19 +129,23 @@ TEST_CASE(test_gif_animated)
 {
     auto bitmap_1 = TRY_OR_FAIL(TRY_OR_FAIL(create_test_rgb_bitmap())->cropped({ 0, 0, 16, 16 }));
     auto bitmap_2 = TRY_OR_FAIL(TRY_OR_FAIL(create_test_rgb_bitmap())->cropped({ 16, 16, 16, 16 }));
+    auto bitmap_3 = TRY_OR_FAIL(bitmap_2->clone());
+
+    bitmap_3->scanline(3)[3] = Color(Color::NamedColor::Red).value();
 
     auto stream_buffer = TRY_OR_FAIL(ByteBuffer::create_uninitialized(3072));
     FixedMemoryStream stream { Bytes { stream_buffer } };
     auto animation_writer = TRY_OR_FAIL(Gfx::GIFWriter::start_encoding_animation(stream, bitmap_1->size(), 0));
     TRY_OR_FAIL(animation_writer->add_frame(*bitmap_1, 100));
     TRY_OR_FAIL(animation_writer->add_frame(*bitmap_2, 200));
+    TRY_OR_FAIL(animation_writer->add_frame_relative_to_last_frame(*bitmap_3, 200, *bitmap_2));
 
     auto encoded_animation = ReadonlyBytes { stream_buffer.data(), stream.offset() };
 
     auto decoder = TRY_OR_FAIL(Gfx::GIFImageDecoderPlugin::create(encoded_animation));
 
     EXPECT_EQ(decoder->size(), bitmap_1->size());
-    EXPECT_EQ(decoder->frame_count(), 2u);
+    EXPECT_EQ(decoder->frame_count(), 3u);
     EXPECT_EQ(decoder->loop_count(), 0u);
     EXPECT(decoder->is_animated());
 
@@ -152,6 +156,10 @@ TEST_CASE(test_gif_animated)
     auto const frame_2 = TRY_OR_FAIL(decoder->frame(1));
     EXPECT_EQ(frame_2.duration, 200);
     expect_bitmaps_equal(*frame_2.image, bitmap_2);
+
+    auto const frame_3 = TRY_OR_FAIL(decoder->frame(2));
+    EXPECT_EQ(frame_3.duration, 200);
+    expect_bitmaps_equal(*frame_3.image, bitmap_3);
 }
 
 TEST_CASE(test_jpeg)
@@ -178,13 +186,78 @@ TEST_CASE(test_webp)
     TRY_OR_FAIL((test_roundtrip<Gfx::WebPWriter, Gfx::WebPImageDecoderPlugin>(TRY_OR_FAIL(create_test_rgba_bitmap()))));
 }
 
+TEST_CASE(test_webp_color_indexing_transform)
+{
+    Array<Color, 256> colors;
+    for (size_t i = 0; i < colors.size(); ++i) {
+        colors[i].set_red(i);
+        colors[i].set_green(255 - i);
+        colors[i].set_blue(128);
+        colors[i].set_alpha(255 - i / 16);
+    }
+    for (int bits_per_pixel : { 1, 2, 4, 8 }) {
+        int number_of_colors = 1 << bits_per_pixel;
+
+        auto bitmap = TRY_OR_FAIL(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, { 47, 33 }));
+        for (int y = 0; y < bitmap->height(); ++y)
+            for (int x = 0; x < bitmap->width(); ++x)
+                bitmap->set_pixel(x, y, colors[(x * bitmap->width() + y) % number_of_colors]);
+
+        auto encoded_data = TRY_OR_FAIL(encode_bitmap<Gfx::WebPWriter>(bitmap));
+        auto decoded_bitmap = TRY_OR_FAIL(expect_single_frame_of_size(*TRY_OR_FAIL(Gfx::WebPImageDecoderPlugin::create(encoded_data)), bitmap->size()));
+        expect_bitmaps_equal(*decoded_bitmap, *bitmap);
+
+        Gfx::WebPEncoderOptions options;
+        options.vp8l_options.allowed_transforms = 0;
+        auto encoded_data_without_color_indexing = TRY_OR_FAIL(encode_bitmap<Gfx::WebPWriter>(bitmap, options));
+        EXPECT(encoded_data.size() < encoded_data_without_color_indexing.size());
+        auto decoded_bitmap_without_color_indexing = TRY_OR_FAIL(expect_single_frame_of_size(*TRY_OR_FAIL(Gfx::WebPImageDecoderPlugin::create(encoded_data)), bitmap->size()));
+        expect_bitmaps_equal(*decoded_bitmap_without_color_indexing, *decoded_bitmap);
+    }
+}
+
+TEST_CASE(test_webp_color_indexing_transform_single_channel)
+{
+    Array<Color, 256> colors;
+    for (size_t i = 0; i < colors.size(); ++i) {
+        colors[i].set_red(0);
+        colors[i].set_green(255 - i);
+        colors[i].set_blue(128);
+        colors[i].set_alpha(255);
+    }
+    for (int bits_per_pixel : { 1, 2, 4, 8 }) {
+        int number_of_colors = 1 << bits_per_pixel;
+
+        auto bitmap = TRY_OR_FAIL(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, { 47, 33 }));
+        for (int y = 0; y < bitmap->height(); ++y)
+            for (int x = 0; x < bitmap->width(); ++x)
+                bitmap->set_pixel(x, y, colors[(x * bitmap->width() + y) % number_of_colors]);
+
+        auto encoded_data = TRY_OR_FAIL(encode_bitmap<Gfx::WebPWriter>(bitmap));
+        auto decoded_bitmap = TRY_OR_FAIL(expect_single_frame_of_size(*TRY_OR_FAIL(Gfx::WebPImageDecoderPlugin::create(encoded_data)), bitmap->size()));
+        expect_bitmaps_equal(*decoded_bitmap, *bitmap);
+
+        Gfx::WebPEncoderOptions options;
+        options.vp8l_options.allowed_transforms = 0;
+        auto encoded_data_without_color_indexing = TRY_OR_FAIL(encode_bitmap<Gfx::WebPWriter>(bitmap, options));
+        if (bits_per_pixel == 8)
+            EXPECT(encoded_data.size() <= encoded_data_without_color_indexing.size());
+        else
+            EXPECT(encoded_data.size() < encoded_data_without_color_indexing.size());
+        auto decoded_bitmap_without_color_indexing = TRY_OR_FAIL(expect_single_frame_of_size(*TRY_OR_FAIL(Gfx::WebPImageDecoderPlugin::create(encoded_data)), bitmap->size()));
+        expect_bitmaps_equal(*decoded_bitmap_without_color_indexing, *decoded_bitmap);
+    }
+}
+
 TEST_CASE(test_webp_icc)
 {
     auto sRGB_icc_profile = MUST(Gfx::ICC::sRGB());
     auto sRGB_icc_data = MUST(Gfx::ICC::encode(sRGB_icc_profile));
 
     auto rgba_bitmap = TRY_OR_FAIL(create_test_rgba_bitmap());
-    auto encoded_rgba_bitmap = TRY_OR_FAIL((encode_bitmap<Gfx::WebPWriter>(rgba_bitmap, Gfx::WebPEncoderOptions { .icc_data = sRGB_icc_data })));
+    Gfx::WebPEncoderOptions options;
+    options.icc_data = sRGB_icc_data;
+    auto encoded_rgba_bitmap = TRY_OR_FAIL((encode_bitmap<Gfx::WebPWriter>(rgba_bitmap, options)));
 
     auto decoded_rgba_plugin = TRY_OR_FAIL(Gfx::WebPImageDecoderPlugin::create(encoded_rgba_bitmap));
     expect_bitmaps_equal(*TRY_OR_FAIL(expect_single_frame_of_size(*decoded_rgba_plugin, rgba_bitmap->size())), rgba_bitmap);
@@ -231,7 +304,7 @@ TEST_CASE(test_webp_incremental_animation)
     auto rgb_bitmap_2 = TRY_OR_FAIL(create_test_rgb_bitmap());
 
     // WebP frames can't be at odd coordinates. Make a pixel at an odd coordinate different to make sure we handle this.
-    rgb_bitmap_2->scanline(3)[3] = Color::Red;
+    rgb_bitmap_2->scanline(3)[3] = Gfx::Color(Color::Red).value();
 
     // 20 kiB is enough for two 47x33 frames.
     auto stream_buffer = TRY_OR_FAIL(ByteBuffer::create_uninitialized(20 * 1024));

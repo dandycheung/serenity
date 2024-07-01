@@ -12,6 +12,7 @@
 #include <Kernel/Interrupts/InterruptDisabler.h>
 #include <Kernel/Library/Panic.h>
 #include <Kernel/Memory/AnonymousVMObject.h>
+#include <Kernel/Memory/MMIOVMObject.h>
 #include <Kernel/Memory/MemoryManager.h>
 #include <Kernel/Memory/Region.h>
 #include <Kernel/Memory/SharedInodeVMObject.h>
@@ -355,7 +356,11 @@ ErrorOr<void> Region::map(PageDirectory& page_directory, PhysicalAddress paddr, 
 void Region::remap()
 {
     VERIFY(m_page_directory);
-    auto result = map(*m_page_directory);
+    ErrorOr<void> result;
+    if (m_vmobject->is_mmio())
+        result = map(*m_page_directory, static_cast<MMIOVMObject const&>(*m_vmobject).base_address());
+    else
+        result = map(*m_page_directory);
     if (result.is_error())
         TODO();
 }
@@ -500,7 +505,6 @@ PageFaultResponse Region::handle_zero_fault(size_t page_index_in_region, Physica
     RefPtr<PhysicalRAMPage> new_physical_page;
 
     if (page_in_slot_at_time_of_fault.is_lazy_committed_page()) {
-        VERIFY(m_vmobject->is_anonymous());
         new_physical_page = static_cast<AnonymousVMObject&>(*m_vmobject).allocate_committed_page({});
         dbgln_if(PAGE_FAULT_DEBUG, "      >> ALLOCATED COMMITTED {}", new_physical_page->paddr());
     } else {

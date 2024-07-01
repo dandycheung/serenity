@@ -46,6 +46,7 @@ public:
     [[nodiscard]] ScopedOperand allocate_register();
     [[nodiscard]] ScopedOperand local(u32 local_index);
     [[nodiscard]] ScopedOperand accumulator();
+    [[nodiscard]] ScopedOperand this_value();
 
     void free_register(Register);
 
@@ -307,6 +308,8 @@ public:
         m_boundaries.take_last();
     }
 
+    [[nodiscard]] ScopedOperand copy_if_needed_to_preserve_evaluation_order(ScopedOperand const&);
+
     [[nodiscard]] ScopedOperand get_this(Optional<ScopedOperand> preferred_dst = {});
 
     void emit_get_by_id(ScopedOperand dst, ScopedOperand base, IdentifierTableIndex property_identifier, Optional<IdentifierTableIndex> base_identifier = {});
@@ -323,16 +326,12 @@ public:
         Yes,
         No,
     };
-    [[nodiscard]] ScopedOperand add_constant(Value value, DeduplicateConstant deduplicate_constant = DeduplicateConstant::Yes)
+    [[nodiscard]] ScopedOperand add_constant(Value);
+
+    [[nodiscard]] Value get_constant(ScopedOperand const& operand) const
     {
-        if (deduplicate_constant == DeduplicateConstant::Yes) {
-            for (size_t i = 0; i < m_constants.size(); ++i) {
-                if (m_constants[i] == value)
-                    return ScopedOperand(*this, Operand(Operand::Type::Constant, i));
-            }
-        }
-        m_constants.append(value);
-        return ScopedOperand(*this, Operand(Operand::Type::Constant, m_constants.size() - 1));
+        VERIFY(operand.operand().is_constant());
+        return m_constants[operand.operand().index()];
     }
 
     UnwindContext const* current_unwind_context() const { return m_current_unwind_context; }
@@ -344,7 +343,7 @@ public:
 private:
     VM& m_vm;
 
-    static CodeGenerationErrorOr<NonnullGCPtr<Executable>> emit_function_body_bytecode(VM&, ASTNode const&, FunctionKind, GCPtr<ECMAScriptFunctionObject const>, MustPropagateCompletion = MustPropagateCompletion::Yes);
+    static CodeGenerationErrorOr<NonnullGCPtr<Executable>> compile(VM&, ASTNode const&, FunctionKind, GCPtr<ECMAScriptFunctionObject const>, MustPropagateCompletion, Vector<DeprecatedFlyString> local_variable_names);
 
     enum class JumpType {
         Continue,
@@ -353,7 +352,7 @@ private:
     void generate_scoped_jump(JumpType);
     void generate_labelled_jump(JumpType, DeprecatedFlyString const& label);
 
-    Generator(VM&, MustPropagateCompletion);
+    Generator(VM&, GCPtr<ECMAScriptFunctionObject const>, MustPropagateCompletion);
     ~Generator() = default;
 
     void grow(size_t);
@@ -376,7 +375,15 @@ private:
     NonnullOwnPtr<RegexTable> m_regex_table;
     MarkedVector<Value> m_constants;
 
+    mutable Optional<ScopedOperand> m_true_constant;
+    mutable Optional<ScopedOperand> m_false_constant;
+    mutable Optional<ScopedOperand> m_null_constant;
+    mutable Optional<ScopedOperand> m_undefined_constant;
+    mutable Optional<ScopedOperand> m_empty_constant;
+    mutable HashMap<i32, ScopedOperand> m_int32_constants;
+
     ScopedOperand m_accumulator;
+    ScopedOperand m_this_value;
     Vector<Register> m_free_registers;
 
     u32 m_next_register { Register::reserved_register_count };
@@ -393,6 +400,8 @@ private:
 
     bool m_finished { false };
     bool m_must_propagate_completion { true };
+
+    GCPtr<ECMAScriptFunctionObject const> m_function;
 };
 
 }

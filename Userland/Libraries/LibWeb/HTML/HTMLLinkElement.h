@@ -33,6 +33,8 @@ public:
     String rel() const { return get_attribute_value(HTML::AttributeNames::rel); }
     String type() const { return get_attribute_value(HTML::AttributeNames::type); }
     String href() const { return get_attribute_value(HTML::AttributeNames::href); }
+    String as() const;
+    WebIDL::ExceptionOr<void> set_as(String const&);
 
     JS::NonnullGCPtr<DOM::DOMTokenList> rel_list();
 
@@ -93,6 +95,9 @@ private:
         JS::GCPtr<Web::DOM::Document> document;
         // FIXME: on document ready (default null)
         //          Null or an algorithm accepting a Document
+        // fetch priority (default auto)
+        //      A fetch priority attribute state
+        Fetch::Infrastructure::Request::Priority fetch_priority { Fetch::Infrastructure::Request::Priority::Auto };
     };
 
     // https://html.spec.whatwg.org/multipage/semantics.html#create-link-options-from-element

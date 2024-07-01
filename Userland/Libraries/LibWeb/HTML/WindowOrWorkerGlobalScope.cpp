@@ -18,6 +18,7 @@
 #include <LibWeb/Fetch/FetchMethod.h>
 #include <LibWeb/HTML/CanvasRenderingContext2D.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/EventSource.h>
 #include <LibWeb/HTML/ImageBitmap.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
@@ -70,6 +71,7 @@ void WindowOrWorkerGlobalScopeMixin::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_indexed_db);
     for (auto& entry : m_performance_entry_buffer_map)
         entry.value.visit_edges(visitor);
+    visitor.visit(m_registered_event_sources);
 }
 
 void WindowOrWorkerGlobalScopeMixin::finalize()
@@ -135,7 +137,7 @@ WebIDL::ExceptionOr<String> WindowOrWorkerGlobalScopeMixin::atob(String const& d
 
     // 3. Return decodedData.
     // decode_base64() returns a byte string. LibJS uses UTF-8 for strings. Use Latin1Decoder to convert bytes 128-255 to UTF-8.
-    auto decoder = TextCodec::decoder_for("windows-1252"sv);
+    auto decoder = TextCodec::decoder_for_exact_name("ISO-8859-1"sv);
     VERIFY(decoder.has_value());
     return TRY_OR_THROW_OOM(vm, decoder->to_utf8(decoded_data.value()));
 }
@@ -647,6 +649,22 @@ void WindowOrWorkerGlobalScopeMixin::queue_the_performance_observer_task()
                 HTML::report_exception(completion, realm);
         }
     }));
+}
+
+void WindowOrWorkerGlobalScopeMixin::register_event_source(Badge<EventSource>, JS::NonnullGCPtr<EventSource> event_source)
+{
+    m_registered_event_sources.set(event_source);
+}
+
+void WindowOrWorkerGlobalScopeMixin::unregister_event_source(Badge<EventSource>, JS::NonnullGCPtr<EventSource> event_source)
+{
+    m_registered_event_sources.remove(event_source);
+}
+
+void WindowOrWorkerGlobalScopeMixin::forcibly_close_all_event_sources()
+{
+    for (auto event_source : m_registered_event_sources)
+        event_source->forcibly_close();
 }
 
 // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#run-steps-after-a-timeout

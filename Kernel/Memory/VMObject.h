@@ -32,6 +32,7 @@ public:
     virtual bool is_inode() const { return false; }
     virtual bool is_shared_inode() const { return false; }
     virtual bool is_private_inode() const { return false; }
+    virtual bool is_mmio() const { return false; }
 
     size_t page_count() const { return m_physical_pages.size(); }
 
@@ -61,6 +62,8 @@ protected:
 
     template<typename Callback>
     void for_each_region(Callback);
+
+    void remap_regions();
 
     IntrusiveListNode<VMObject> m_list_node;
     FixedArray<RefPtr<PhysicalRAMPage>> m_physical_pages;

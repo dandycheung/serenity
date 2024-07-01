@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <AK/Concepts.h>
+#include <AK/Coroutine.h>
 #include <AK/Forward.h>
 #include <AK/Function.h>
 #include <AK/Noncopyable.h>
@@ -71,6 +73,8 @@ public:
 
     void wake();
 
+    void adopt_coroutine(Coroutine<void>&&);
+
     void quit(int);
     void unquit();
     bool was_exit_requested() const;
@@ -103,4 +107,26 @@ private:
 
 void deferred_invoke(ESCAPING Function<void()>);
 
+template<typename T>
+requires(IsSpecializationOf<InvokeResult<T&>, Coroutine>)
+auto run_async_in_new_event_loop(T&& function)
+{
+    Core::EventLoop loop;
+    auto coro = function();
+    loop.spin_until([&] {
+        return coro.await_ready();
+    });
+    return coro.await_resume();
+}
+
+template<typename T>
+requires(IsSpecializationOf<InvokeResult<T&>, Coroutine>)
+auto run_async_in_current_event_loop(T&& function)
+{
+    auto coro = function();
+    EventLoop::current().spin_until([&] {
+        return coro.await_ready();
+    });
+    return coro.await_resume();
+}
 }

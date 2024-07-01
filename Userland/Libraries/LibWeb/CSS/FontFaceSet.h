@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2024, Andrew Kaster <akaster@serenityos.org>
+ * Copyright (c) 2024, Jamie Mansfield <jmansfield@cadixdev.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -11,11 +12,12 @@
 #include <LibWeb/Bindings/FontFaceSetPrototype.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/CSS/FontFace.h>
+#include <LibWeb/DOM/EventTarget.h>
 
 namespace Web::CSS {
 
-class FontFaceSet final : public Bindings::PlatformObject {
-    WEB_PLATFORM_OBJECT(FontFaceSet, Bindings::PlatformObject);
+class FontFaceSet final : public DOM::EventTarget {
+    WEB_PLATFORM_OBJECT(FontFaceSet, DOM::EventTarget);
     JS_DECLARE_ALLOCATOR(FontFaceSet);
 
 public:
@@ -28,6 +30,14 @@ public:
     JS::NonnullGCPtr<FontFaceSet> add(JS::Handle<FontFace>);
     bool delete_(JS::Handle<FontFace>);
     void clear();
+
+    void set_onloading(WebIDL::CallbackType*);
+    WebIDL::CallbackType* onloading();
+    void set_onloadingdone(WebIDL::CallbackType*);
+    WebIDL::CallbackType* onloadingdone();
+    void set_onloadingerror(WebIDL::CallbackType*);
+    WebIDL::CallbackType* onloadingerror();
+
     JS::ThrowCompletionOr<JS::NonnullGCPtr<JS::Promise>> load(String const& font, String const& text);
 
     JS::NonnullGCPtr<JS::Promise> ready() const;

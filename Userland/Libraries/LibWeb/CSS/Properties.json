@@ -712,6 +712,7 @@
     ],
     "__comment": "FIXME: This should be a <clip-source> | [ <basic-shape> || <geometry-box> ]",
     "valid-types": [
+      "basic-shape",
       "url"
     ],
     "initial": "none"
@@ -888,7 +889,10 @@
     ],
     "valid-identifiers": [
       "auto",
-      "content"
+      "content",
+      "fit-content",
+      "max-content",
+      "min-content"
     ],
     "percentages-resolve-to": "length"
   },

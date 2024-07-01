@@ -40,7 +40,7 @@ ErrorOr<VP8LHeader> decode_webp_chunk_VP8L_header(ReadonlyBytes vp8l_data)
     u8 version_number = TRY(bit_stream.read_bits(3));
     VERIFY(bit_stream.is_eof());
 
-    dbgln_if(WEBP_DEBUG, "width {}, height {}, is_alpha_used {}, version_number {}",
+    dbgln_if(WEBP_DEBUG, "VP8L: width {}, height {}, is_alpha_used {}, version_number {}",
         width, height, is_alpha_used, version_number);
 
     // "The version_number is a 3 bit code that must be set to 0. Any other value should be treated as an error."
@@ -89,9 +89,7 @@ static ErrorOr<CanonicalCode> decode_webp_chunk_VP8L_prefix_code(LittleEndianInp
     dbgln_if(WEBP_DEBUG, "  num_code_lengths {}", num_code_lengths);
     VERIFY(num_code_lengths <= 19);
 
-    constexpr int kCodeLengthCodes = 19;
-    int kCodeLengthCodeOrder[kCodeLengthCodes] = { 17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
-    u8 code_length_code_lengths[kCodeLengthCodes] = { 0 }; // "All zeros" [sic]
+    u8 code_length_code_lengths[kCodeLengthCodeOrder.size()] = { 0 }; // "All zeros" [sic]
     for (int i = 0; i < num_code_lengths; ++i)
         code_length_code_lengths[kCodeLengthCodeOrder[i]] = TRY(bit_stream.read_bits(3));
 
@@ -180,11 +178,6 @@ static ErrorOr<PrefixCodeGroup> decode_webp_chunk_VP8L_prefix_code_group(u16 col
         group[i] = TRY(decode_webp_chunk_VP8L_prefix_code(bit_stream, alphabet_sizes[i]));
     return group;
 }
-
-enum class ImageKind {
-    SpatiallyCoded,
-    EntropyCoded,
-};
 
 static ErrorOr<NonnullRefPtr<Bitmap>> decode_webp_chunk_VP8L_image(ImageKind image_kind, BitmapFormat format, IntSize const& size, LittleEndianInputBitStream& bit_stream)
 {
@@ -372,6 +365,7 @@ static ErrorOr<NonnullRefPtr<Bitmap>> decode_webp_chunk_VP8L_image(ImageKind ima
             // "Distance codes larger than 120 denote the pixel-distance in scan-line order, offset by 120."
             // "The smallest distance codes [1..120] are special, and are reserved for a close neighborhood of the current pixel."
             if (distance <= 120) {
+                // "The decoder can convert a distance code distance_code to a scan-line order distance dist as follows:"
                 auto offset = distance_map[distance - 1];
                 distance = offset.x + offset.y * bitmap->physical_width();
                 if (distance < 1)
@@ -881,20 +875,6 @@ ErrorOr<NonnullRefPtr<Bitmap>> decode_webp_chunk_VP8L_contents(VP8LHeader const&
     while (TRY(bit_stream.read_bits(1))) {
         // transform            =  predictor-tx / color-tx / subtract-green-tx
         // transform            =/ color-indexing-tx
-
-        enum TransformType {
-            // predictor-tx         =  %b00 predictor-image
-            PREDICTOR_TRANSFORM = 0,
-
-            // color-tx             =  %b01 color-image
-            COLOR_TRANSFORM = 1,
-
-            // subtract-green-tx    =  %b10
-            SUBTRACT_GREEN_TRANSFORM = 2,
-
-            // color-indexing-tx    =  %b11 color-indexing-image
-            COLOR_INDEXING_TRANSFORM = 3,
-        };
 
         TransformType transform_type = static_cast<TransformType>(TRY(bit_stream.read_bits(2)));
         dbgln_if(WEBP_DEBUG, "transform type {}", (int)transform_type);
